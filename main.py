@@ -1,0 +1,322 @@
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+
+# ---------- CSS existant ----------
+
+def load_css():
+    with open("style.css") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# ---------- TRAITEMENT PRINCIPAL ----------
+
+def traitement(df_ref, df_back, utilisateurs_selectionnes=None):
+    # Nettoyage fichier de référence
+    df_ref_filtre = df_ref[df_ref["Date de fin"].isna()]
+
+    # Identifiant (col A), JUR (col B), SOUS JUR (col D)
+    liste_identifiants = df_ref_filtre["Identifiant"].dropna().astype(str).unique()
+    liste_jur        = df_ref_filtre.iloc[:, 1].dropna().astype(str).unique()
+    liste_sousjur    = df_ref_filtre.iloc[:, 3].dropna().astype(str).unique()
+
+    # Ensemble des identifiants de référence
+    Id_ref = set(liste_identifiants) | set(liste_jur) | set(liste_sousjur)
+
+    # Nettoyage Back
+    df_back = df_back.copy()
+    df_back["Nom utilisateur"] = (
+        df_back["Nom utilisateur"]
+        .astype(str).str.strip().str.upper()
+    )
+
+    df_back["Identifiant"] = (
+        df_back["Identifiant"]
+        .astype(str).str.strip()
+    )
+
+    # Filtre sur les utilisateurs sélectionnés (si liste fournie)
+    if utilisateurs_selectionnes:
+        # On met tout en MAJ / strip pour matcher les valeurs nettoyées
+        users_clean = [u.strip().upper() for u in utilisateurs_selectionnes]
+        df_back_filtre = df_back[df_back["Nom utilisateur"].isin(users_clean)]
+    else:
+        # Sinon : tous les utilisateurs présents dans le fichier Back
+        df_back_filtre = df_back
+
+    # ---------- Résultats globaux ----------
+    resultats = []
+    for utilisateur in df_back_filtre["Nom utilisateur"].unique():
+        sous_df = df_back_filtre[df_back_filtre["Nom utilisateur"] == utilisateur]
+        id_utilisateur_brut = set(
+            sous_df["Identifiant"].dropna().astype(str).unique()
+        )
+        id_utilisateur = id_utilisateur_brut & Id_ref
+        manquants = Id_ref - id_utilisateur
+        presents  = Id_ref & id_utilisateur
+        resultats.append({
+            "utilisateur": utilisateur,
+            "nb_identifiants_attendus": len(Id_ref),
+            "nb_identifiants_present":  len(presents),
+            "nb_identifiants_manquants": len(manquants),
+            "identifiants_manquants": ", ".join(sorted(manquants))
+        })
+
+    df_resultat_global = pd.DataFrame(resultats)
+
+    # ---------- Résultats détaillés ----------
+    lignes_detaillees = []
+    for row in resultats:
+        utilisateur = row["utilisateur"]
+        identifiants = row["identifiants_manquants"]
+        identifiants_list = [i.strip() for i in identifiants.split(",") if i.strip()]
+        if identifiants_list:
+            for identifiant in identifiants_list:
+                lignes_detaillees.append({
+                    "utilisateur": utilisateur,
+                    "identifiant_manquant": identifiant
+                })
+        else:
+            lignes_detaillees.append({
+                "utilisateur": utilisateur,
+                "identifiant_manquant": ""
+            })
+
+    df_resultat_detaille = pd.DataFrame(lignes_detaillees)
+
+    # ---------- Identifiants en trop ----------
+
+    lignes_en_trop = []
+
+    for utilisateur in df_back_filtre["Nom utilisateur"].unique():
+
+        sous_df = df_back_filtre[df_back_filtre["Nom utilisateur"] == utilisateur]
+
+        id_utilisateur_brut = set(
+
+            sous_df["Identifiant"].dropna().astype(str).unique()
+
+        )
+
+        id_en_trop = id_utilisateur_brut - Id_ref
+
+        for identifiant in id_en_trop:
+
+            lignes_en_trop.append({
+
+                "utilisateur": utilisateur,
+
+                "identifiant_non_attendu": identifiant
+
+            })
+
+    df_resultat_en_trop = pd.DataFrame(lignes_en_trop)
+
+    # ---------- Ajouter les identifiants non attendus au résumé ----------
+    df_en_trop_concat = (
+        df_resultat_en_trop
+        .groupby("utilisateur")["identifiant_non_attendu"]
+        .apply(lambda x: ", ".join(sorted(x)))
+        .reset_index()
+        .rename(columns={"identifiant_non_attendu": "identifiants_non_attendus"})
+    )
+# Fusion avec df_resultat_global
+    df_resultat_global = df_resultat_global.merge(
+        df_en_trop_concat, on="utilisateur", how="left"
+    )
+# Remplacer les NaN par vide s’il n’y a pas d’identifiants en trop
+    df_resultat_global["identifiants_non_attendus"] = (
+        df_resultat_global["identifiants_non_attendus"].fillna("")
+    )
+
+    return df_resultat_global, df_resultat_detaille, df_resultat_en_trop
+
+
+# ---------- STREAMLIT ----------
+
+def main():
+    st.set_page_config(page_title = "Verification des identifiants", layout="wide")
+    load_css()
+
+    col1, col2 = st.columns([1, 4])  # Logo à gauche, texte à droite
+    with col1:
+        st.image("logo_accor.png", width=120)
+    with col2:
+        st.markdown("""
+    <div style='padding-top: 15px;'>
+    <h1 style='text-align: center;margin-bottom: 0;'>Application interne - Vérification des identifiants</h1>
+    </div>
+    """, unsafe_allow_html=True)
+    # Texte "Bienvenue" centré
+    st.markdown("""
+    <div style='text-align: center; margin-top: -10px; font-size: 18px;'>
+        Bienvenue dans l'outil de <strong>Contrôle des identifiants</strong> par utilisateur.
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<br><br>", unsafe_allow_html=True)#ajoutez de l'espace 
+
+    st.subheader("1. Importer vos fichiers")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        fichier_ref = st.file_uploader("Identifiants de référence", type=["xlsx"])
+
+        st.caption("Fichier contenant tous les identifiants attendus.")
+
+        st.image("images/exemple_ref.png", use_container_width=True)
+
+    with col2:
+
+        fichier_back = st.file_uploader("Identifiants présents (Back)", type=["xlsx"])
+
+        st.caption("Fichier contenant les identifiants réellement utilisés.")
+
+        st.image("images/exemple_back.png", use_container_width=True)
+
+    if fichier_ref and fichier_back:
+
+        # Lecture simple
+
+        df_ref = pd.read_excel(fichier_ref)
+
+        df_back_raw = pd.read_excel(fichier_back)
+
+        if fichier_ref and fichier_back:
+
+            st.markdown("### Vérification des fichiers importés")
+
+    # === 1️ Vérification FICHIER RÉFÉRENCE ===
+
+            try:
+
+                df_ref = pd.read_excel(fichier_ref)
+
+                df_ref.columns = (
+
+                df_ref.columns.astype(str)
+
+                .str.strip()
+
+                .str.replace("\xa0", " ", regex=True)
+
+                .str.replace("Unnamed: ", "", regex=True)
+
+                .str.replace(r"\d+", "", regex=True)
+
+                .str.normalize('NFKD')
+
+                .str.encode('ascii', errors='ignore')
+
+                .str.decode('utf-8')
+
+                )
+
+                colonnes_utiles_ref = {"Identifiant", "Date de fin"}
+
+                colonnes_trouvees_ref = [c for c in df_ref.columns if c.strip()]
+
+                colonnes_manquantes_ref = colonnes_utiles_ref - set(colonnes_trouvees_ref)
+                st.info(" Fichier Référence :")
+
+                if colonnes_manquantes_ref:
+                    st.warning(f" Colonnes manquantes : {', '.join(colonnes_manquantes_ref)}")
+                else:
+                    st.success(" Fichier Référence correctement chargé.")
+                st.info(f" Colonnes détectées : {', '.join(colonnes_trouvees_ref)}")
+
+            except Exception as e:
+                st.error(f"Erreur dans le fichier Référence : {e}")
+                st.stop()
+
+    # === 2️ Vérification FICHIER BACK ===
+
+            try:
+                df_back = pd.read_excel(fichier_back)
+
+                df_back.columns = (
+                    df_back.columns.astype(str)
+                    .str.strip()
+                    .str.replace("\xa0", " ", regex=True)
+                    .str.replace("Unnamed: ", "", regex=True)
+                    .str.replace(r"\d+", "", regex=True)
+                    .str.normalize('NFKD')
+                    .str.encode('ascii', errors='ignore')
+                    .str.decode('utf-8')
+                    )
+
+                colonnes_utiles_back = {"Nom utilisateur", "Identifiant"}
+                colonnes_trouvees_back = [c for c in df_back.columns if c.strip()]
+                colonnes_manquantes_back = colonnes_utiles_back - set(colonnes_trouvees_back)
+                st.info(" Fichier Back :")
+
+                if colonnes_manquantes_back:
+                    st.warning(f" Colonnes manquantes : {', '.join(colonnes_manquantes_back)}")
+                    st.stop()
+
+                else:
+                    st.success(" Fichier Back correctement chargé.")
+                st.info(f" Colonnes détectées : {', '.join(colonnes_trouvees_back)}")
+
+
+            except Exception as e:
+                st.error(f" Erreur dans le fichier Back : {e}")
+                st.stop()
+
+    # ✅ Si tout est bon, on continue
+                st.success(" Fichiers importés et validés avec succès.")
+                
+        # Préparer la liste des utilisateurs pour le multiselect
+        liste_utilisateurs = (
+            df_back_raw["Nom utilisateur"]
+            .astype(str).str.strip().str.upper().dropna().unique()
+
+        )
+
+        liste_utilisateurs = sorted(liste_utilisateurs)
+        st.markdown("### 1.b Sélection des utilisateurs à analyser")
+
+        utilisateurs_selectionnes = st.multiselect(
+            "Choisissez un ou plusieurs utilisateurs (laisser vide pour tous) :",
+            options=liste_utilisateurs
+        )
+
+        if st.button("Lancer l'analyse"):
+            df_global, df_detail, df_id_trop = traitement(
+                df_ref, df_back_raw, utilisateurs_selectionnes
+            )
+
+            st.subheader("2. Résultats")
+            st.write("### Résumé par utilisateur")
+            st.dataframe(df_global)
+            st.write("### Détail des identifiants manquants")
+            st.dataframe(df_detail)
+            st.write("### Identifiants non attendus")
+            st.dataframe(df_id_trop)
+
+            # Tri avant export
+            df_global = df_global.sort_values(by=["utilisateur"])
+            df_detail = df_detail.sort_values(by=["utilisateur", "identifiant_manquant"])
+            df_id_trop = df_id_trop.sort_values(by=["utilisateur", "identifiant_non_attendu"])
+
+            # Export Excel
+            output = BytesIO()
+
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_global.to_excel(writer, index=False, sheet_name="Résumé")
+                df_detail.to_excel(writer, index=False, sheet_name="Manquants")
+                df_id_trop.to_excel(writer, index=False, sheet_name="En trop")
+            output.seek(0)
+
+            st.download_button(
+                label=" Télécharger les résultats (xlsx)",
+                data=output,
+                file_name="Resultats_identifiants_selection.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+
+if __name__ == "__main__":
+    main()
+ 
